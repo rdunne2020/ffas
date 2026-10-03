@@ -60,7 +60,18 @@ export async function createApp({ dataDir = path.join(root, '.data'), maxUploadB
   let active: { job: Job; child: ChildProcess } | null = null;
   let uploadCount = 0, stopping = false;
   let available = true;
-  try { await Promise.all(['ffmpeg', 'ffprobe'].map(bin => exec(bin, ['-version'], { timeout: 5000 }))); } catch { available = false; }
+  let encoders: string[] = [];
+  try {
+    const [result] = await Promise.all([exec('ffmpeg', ['-hide_banner', '-encoders'], { timeout: 5000 }), exec('ffprobe', ['-version'], { timeout: 5000 })]);
+    encoders = [...result.stdout.matchAll(/^\s*[VAS][A-Z.]{5}\s+(\S+)/gm)].flatMap(match => match[1] ? [match[1]] : []);
+  } catch { available = false; }
+  // Serialize mutations that could otherwise remove a source during job submission.
+  let mutations: Promise<unknown> = Promise.resolve();
+  const mutate = <T>(action: () => Promise<T>): Promise<T> => {
+    const next = mutations.then(action);
+    mutations = next.catch(() => {});
+    return next;
+  };
   const save = (kind: 'uploads' | 'jobs', record: MediaFile | Job) => writeFile(path.join(dataDir, kind, `${record.id}.json`), JSON.stringify(record, null, 2));
   for (const kind of ['uploads', 'jobs'] as const) {
     for (const name of await readdir(path.join(dataDir, kind))) {
@@ -135,7 +146,7 @@ export async function createApp({ dataDir = path.join(root, '.data'), maxUploadB
       if (req.headers['sec-fetch-site'] === 'cross-site') return json(res, 403, { error: 'Cross-site requests are not allowed.' });
       const url = new URL(req.url ?? '/', `http://${host}`);
       const pathname = url.pathname;
-      if (req.method === 'GET' && pathname === '/api/health') return json(res, 200, { available, maxUploadBytes });
+      if (req.method === 'GET' && pathname === '/api/health') return json(res, 200, { available, maxUploadBytes, encoders });
       if (req.method === 'GET' && pathname === '/api/uploads') return json(res, 200, [...uploads.values()].reverse());
       if (req.method === 'GET' && pathname === '/api/jobs') return json(res, 200, [...jobs.values()].reverse());
       if (req.method === 'POST' && pathname === '/api/uploads') {
@@ -163,27 +174,58 @@ export async function createApp({ dataDir = path.join(root, '.data'), maxUploadB
         finally { uploadCount--; }
       }
       if (req.method === 'POST' && pathname === '/api/jobs') {
-        if (!available) return json(res, 503, { error: 'FFmpeg is unavailable.' });
-        if ([...jobs.values()].filter(j => ['queued', 'running'].includes(j.status)).length >= 8) return json(res, 429, { error: 'The queue is full. Wait for an export to finish.' });
         const request = await body(req);
-        if (!isRecord(request) || typeof request.uploadId !== 'string') throw new Error('Invalid upload ID.');
-        const media = uploads.get(request.uploadId);
-        if (!media) return json(res, 404, { error: 'Source file not found. Upload it again.' });
-        const edit = validateEdit(request, media);
-        const job: Job = { id: randomUUID(), uploadId: media.id, name: media.name.replace(/\.[^.]+$/, '') + (edit.preview ? '-preview.' : '-edited.') + edit.format, edit, status: 'queued', progress: 0, createdAt: new Date().toISOString() };
-        await save('jobs', job); jobs.set(job.id, job);
-        json(res, 202, job); void runNext(); return;
+        return await mutate(async () => {
+          if (!available) return json(res, 503, { error: 'FFmpeg is unavailable.' });
+          if ([...jobs.values()].filter(j => ['queued', 'running'].includes(j.status)).length >= 8) return json(res, 429, { error: 'The queue is full. Wait for an export to finish.' });
+          if (!isRecord(request) || typeof request.uploadId !== 'string') throw new Error('Invalid upload ID.');
+          const media = uploads.get(request.uploadId);
+          if (!media) return json(res, 404, { error: 'Source file not found. Upload it again.' });
+          const edit = validateEdit(request, media);
+          const required = [formats[edit.format].video ? edit.videoCodec : undefined, media.hasAudio && !edit.mute ? edit.audioCodec : undefined].filter(codec => codec !== undefined);
+          if (required.some(codec => !encoders.includes(codec))) return json(res, 400, { error: 'A selected encoder is not installed in this FFmpeg build.' });
+          const job: Job = { id: randomUUID(), uploadId: media.id, name: media.name.replace(/\.[^.]+$/, '') + (edit.preview ? '-preview.' : '-edited.') + edit.format, edit, status: 'queued', progress: 0, createdAt: new Date().toISOString() };
+          await save('jobs', job); jobs.set(job.id, job);
+          json(res, 202, job); void runNext();
+        });
+      }
+      const remove = /^\/api\/(uploads|jobs)\/([a-f0-9-]+)$/.exec(pathname);
+      if (req.method === 'DELETE' && remove?.[2] && uuid.test(remove[2])) {
+        const id = remove[2];
+        return await mutate(async () => {
+          if (remove[1] === 'uploads') {
+            const media = uploads.get(id);
+            if (!media) return json(res, 404, { error: 'Source file not found.' });
+            if (active?.job.uploadId === id || [...jobs.values()].some(job => job.uploadId === id && ['queued', 'running'].includes(job.status))) {
+              return json(res, 409, { error: 'This source is in use. Cancel or finish its jobs before deleting it.' });
+            }
+            await rm(sourcePath(media), { force: true });
+            await rm(path.join(dataDir, 'uploads', `${id}.json`), { force: true });
+            uploads.delete(id);
+          } else {
+            const job = jobs.get(id);
+            if (!job) return json(res, 404, { error: 'Export not found.' });
+            if (active?.job.id === id || ['queued', 'running'].includes(job.status)) return json(res, 409, { error: 'Cancel or finish this job before deleting it.' });
+            await rm(resultPath(job), { force: true });
+            await rm(path.join(dataDir, 'jobs', `${id}.json`), { force: true });
+            jobs.delete(id);
+          }
+          return json(res, 200, { deleted: id });
+        });
       }
       const cancel = /^\/api\/jobs\/([a-f0-9-]+)\/cancel$/.exec(pathname);
       if (req.method === 'POST' && cancel?.[1]) {
-        const job = jobs.get(cancel[1]);
-        if (!job) return json(res, 404, { error: 'Job not found.' });
-        if (['queued', 'running'].includes(job.status)) {
-          job.status = 'cancelled';
-          if (active?.job.id === job.id) active.child.kill('SIGKILL');
-          await save('jobs', job);
-        }
-        return json(res, 200, job);
+        const id = cancel[1];
+        return await mutate(async () => {
+          const job = jobs.get(id);
+          if (!job) return json(res, 404, { error: 'Job not found.' });
+          if (['queued', 'running'].includes(job.status)) {
+            job.status = 'cancelled';
+            if (active?.job.id === job.id) active.child.kill('SIGKILL');
+            await save('jobs', job);
+          }
+          return json(res, 200, job);
+        });
       }
       const file = /^\/(media|results)\/([a-f0-9-]+)$/.exec(pathname);
       if (['GET', 'HEAD'].includes(req.method ?? '') && file?.[2] && uuid.test(file[2])) {
@@ -198,7 +240,7 @@ export async function createApp({ dataDir = path.join(root, '.data'), maxUploadB
         }
         return;
       }
-      const staticFiles: Record<string, string> = { '/': 'public/index.html', '/app.js': 'dist/public/app.js', '/shared/model.js': 'dist/shared/model.js', '/style.css': 'public/style.css', '/favicon.svg': 'public/favicon.svg' };
+      const staticFiles: Record<string, string> = { '/': 'public/index.html', '/app.js': 'dist/public/app.js', '/shared/model.js': 'dist/shared/model.js', '/shared/encoding.js': 'dist/shared/encoding.js', '/style.css': 'public/style.css', '/favicon.svg': 'public/favicon.svg' };
       const filename = staticFiles[pathname];
       if (['GET', 'HEAD'].includes(req.method ?? '') && Object.hasOwn(staticFiles, pathname) && filename) {
         await serveFile(req, res, path.join(root, filename), contentTypes[path.extname(filename)] ?? 'application/octet-stream'); return;

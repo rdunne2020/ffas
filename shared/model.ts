@@ -1,5 +1,7 @@
+import type { EncodingOptions } from './encoding.js';
+import { isEncodingOptions } from './encoding.js';
 /** JSON contracts shared by the HTTP server and browser editor. */
-export type OutputFormat = 'mp4' | 'webm' | 'mp3' | 'wav' | 'flac' | 'm4a';
+export type OutputFormat = 'mp4' | 'mkv' | 'webm' | 'mp3' | 'wav' | 'flac' | 'm4a';
 export type Quality = 'high' | 'balanced' | 'small';
 export type Resolution = 'original' | '1080' | '720' | '480';
 export type ClipEdge = 'start' | 'end';
@@ -22,7 +24,7 @@ export interface MediaFile extends MediaMetadata {
   bytes: number;
   createdAt: string;
 }
-export interface EditRequest {
+export interface EditRequest extends EncodingOptions {
   uploadId: string;
   clips: Clip[];
   format: OutputFormat;
@@ -33,7 +35,7 @@ export interface EditRequest {
   mute?: boolean;
   preview?: boolean;
 }
-export interface Edit {
+export interface Edit extends EncodingOptions {
   format: OutputFormat;
   quality: Quality;
   resolution: Resolution;
@@ -58,7 +60,7 @@ export interface Job {
   bytes?: number;
   error?: string;
 }
-export interface HealthResponse { available: boolean; maxUploadBytes: number }
+export interface HealthResponse { available: boolean; maxUploadBytes: number; encoders?: string[] }
 export interface ApiError { error: string }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -68,7 +70,7 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'An unexpected error occurred.';
 }
 export function isOutputFormat(value: unknown): value is OutputFormat {
-  return value === 'mp4' || value === 'webm' || value === 'mp3' || value === 'wav' || value === 'flac' || value === 'm4a';
+  return value === 'mp4' || value === 'mkv' || value === 'webm' || value === 'mp3' || value === 'wav' || value === 'flac' || value === 'm4a';
 }
 export function isQuality(value: unknown): value is Quality {
   return value === 'high' || value === 'balanced' || value === 'small';
@@ -105,7 +107,7 @@ export function parseJob(value: unknown): Job {
     throw new Error('Invalid job metadata.');
   }
   const edit = value.edit;
-  if (!isRecord(edit) || !isOutputFormat(edit.format) || !isQuality(edit.quality) || !isResolution(edit.resolution)
+  if (!isRecord(edit) || !isEncodingOptions(edit) || !isOutputFormat(edit.format) || !isQuality(edit.quality) || !isResolution(edit.resolution)
     || !Array.isArray(edit.clips) || !edit.clips.every(isClip) || !finite(edit.duration)
     || typeof edit.flipH !== 'boolean' || typeof edit.flipV !== 'boolean' || typeof edit.mute !== 'boolean' || typeof edit.preview !== 'boolean') {
     throw new Error('Invalid job settings.');
@@ -114,7 +116,8 @@ export function parseJob(value: unknown): Job {
 }
 export function parseHealth(value: unknown): HealthResponse {
   if (!isRecord(value) || typeof value.available !== 'boolean' || !finite(value.maxUploadBytes)) throw new Error('Invalid engine response.');
-  return { available: value.available, maxUploadBytes: value.maxUploadBytes };
+  if (value.encoders !== undefined && (!Array.isArray(value.encoders) || !value.encoders.every(item => typeof item === 'string'))) throw new Error('Invalid encoder list.');
+  return { available: value.available, maxUploadBytes: value.maxUploadBytes, encoders: value.encoders as string[] | undefined };
 }
 export function parseList<T>(value: unknown, parse: (item: unknown) => T): T[] {
   if (!Array.isArray(value)) throw new Error('Expected a list from the server.');

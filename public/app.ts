@@ -1,3 +1,5 @@
+import { videoChoices, audioChoices, codecLabels, defaultCrf, isVideoCodec, isAudioCodec, isPreset } from '../shared/encoding.js';
+import type { EncodingOptions } from '../shared/encoding.js';
 import type { Clip, ClipEdge, MediaFile, Job, EditRequest } from '../shared/model.js';
 import { errorMessage, isRecord, isClip, isOutputFormat, isQuality, isResolution, parseMediaFile, parseJob, parseHealth, parseList } from '../shared/model.js';
 
@@ -7,6 +9,29 @@ function element<T extends HTMLElement>(id: string, constructor: { new(): T }): 
   return value;
 }
 const elements = {
+  'video-codec-field': element('video-codec-field', HTMLElement),
+  'video-codec': element('video-codec', HTMLSelectElement),
+  'codec-help': element('codec-help', HTMLElement),
+  'advanced-settings': element('advanced-settings', HTMLDetailsElement),
+  'advanced-video': element('advanced-video', HTMLElement),
+  'rate-control': element('rate-control', HTMLSelectElement),
+  'crf-field': element('crf-field', HTMLElement),
+  'crf': element('crf', HTMLInputElement),
+  'crf-help': element('crf-help', HTMLElement),
+  'video-bitrate-field': element('video-bitrate-field', HTMLElement),
+  'video-bitrate': element('video-bitrate', HTMLInputElement),
+  'preset-field': element('preset-field', HTMLElement),
+  'encoder-preset': element('encoder-preset', HTMLSelectElement),
+  'vp9-speed-field': element('vp9-speed-field', HTMLElement),
+  'vp9-speed': element('vp9-speed', HTMLInputElement),
+  'frame-rate': element('frame-rate', HTMLSelectElement),
+  'advanced-audio': element('advanced-audio', HTMLElement),
+  'audio-codec': element('audio-codec', HTMLSelectElement),
+  'audio-bitrate-field': element('audio-bitrate-field', HTMLElement),
+  'audio-bitrate': element('audio-bitrate', HTMLInputElement),
+  'reset-encoding': element('reset-encoding', HTMLButtonElement),
+  'jobs-heading': element('jobs-heading', HTMLElement),
+
   'source-title': element('source-title', HTMLHeadingElement),
   'result-title': element('result-title', HTMLHeadingElement),
   'engine': element('engine', HTMLElement),
@@ -84,9 +109,12 @@ interface EditorState {
   uploading: boolean;
   pendingPreview: string | null;
   engine: boolean;
+  encoders: string[];
   submitting: boolean;
 }
-const state: EditorState = { files: [], source: null, clips: [], selected: 0, jobs: [], sequencePlaying: false, sequenceIndex: 0, uploading: false, pendingPreview: null, engine: false, submitting: false };
+const state: EditorState = { files: [], source: null, clips: [], selected: 0, jobs: [], sequencePlaying: false, sequenceIndex: 0, uploading: false, pendingPreview: null, engine: false, encoders: [], submitting: false };
+const encodingDirty = new Set<string>();
+let previousVideoCodec = '';
 const player = $('source-player');
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 const time = (seconds: number) => { const value = Math.max(0, Number(seconds) || 0); const hours = Math.floor(value / 3600); return `${hours ? String(hours).padStart(2, '0') + ':' : ''}${String(Math.floor(value / 60) % 60).padStart(2, '0')}:${(value % 60).toFixed(2).padStart(5, '0')}`; };
@@ -103,7 +131,7 @@ const post = (url: string, data: unknown = {}): Promise<Job> => api(url, parseJo
 function renderLibrary() {
   $('file-count').textContent = String(state.files.length);
   $('library-empty').hidden = state.files.length > 0;
-  $('file-list').innerHTML = state.files.map(file => `<button class="file-item ${state.source?.id === file.id ? 'selected' : ''}" data-file="${file.id}" aria-pressed="${state.source?.id === file.id}" title="${escape(file.name)}"><span class="file-icon">${file.hasVideo ? 'VID' : 'AUD'}</span><span class="file-copy"><span class="file-name">${escape(file.name)}</span><span class="file-meta">${time(file.duration)} · ${size(file.bytes)}</span></span></button>`).join('');
+  $('file-list').innerHTML = state.files.map(file => `<div class="file-entry"><button class="file-item ${state.source?.id === file.id ? 'selected' : ''}" data-file="${file.id}" aria-pressed="${state.source?.id === file.id}" title="${escape(file.name)}"><span class="file-icon">${file.hasVideo ? 'VID' : 'AUD'}</span><span class="file-copy"><span class="file-name">${escape(file.name)}</span><span class="file-meta">${time(file.duration)} · ${size(file.bytes)}</span></span></button><button class="file-delete" data-delete-upload="${file.id}" aria-label="Delete upload ${escape(file.name)}">Delete</button></div>`).join('');
 }
 function selectFile(file: MediaFile) {
   player.pause(); state.sequencePlaying = false; state.source = file;
@@ -115,7 +143,8 @@ function selectFile(file: MediaFile) {
   $('total-time').textContent = time(file.duration);
   $('source-info').textContent = `${file.hasVideo ? `${file.width} × ${file.height} · ` : ''}${size(file.bytes)}`;
   $('format').value = file.hasVideo ? 'mp4' : 'mp3';
-  for (const option of $('format').options) option.disabled = ['mp4', 'webm'].includes(option.value) ? !file.hasVideo : !file.hasAudio;
+  resetEncoding();
+  for (const option of $('format').options) option.disabled = ['mp4', 'mkv', 'webm'].includes(option.value) ? !file.hasVideo : !file.hasAudio;
   (['play', 'play-edit', 'clip-start', 'clip-end', 'mark-in', 'mark-out', 'add-clip', 'split-clip', 'scrubber', 'settings'] as const).forEach(id => $(id).disabled = false);
   (['flip-h', 'flip-v', 'mute'] as const).forEach(id => $(id).checked = false);
   $('scrubber').max = String(file.duration); $('scrubber').value = '0';
@@ -126,7 +155,18 @@ function selectFile(file: MediaFile) {
 }
 function renderClips(preserveInputs = false) {
   const selected = state.clips[state.selected];
-  if (!selected || !state.source) return;
+  const empty = !selected || !state.source;
+  (['clip-start', 'clip-end', 'mark-in', 'mark-out', 'split-clip', 'play-edit'] as const).forEach(id => $(id).disabled = empty);
+  $('selection').hidden = empty;
+  if (empty) {
+    $('clip-list').innerHTML = state.source ? '<li class="empty-sequence">No clips selected. Add a clip to build an export.</li>' : '';
+    $('timeline-clips').innerHTML = '';
+    $('clip-start').value = '0'; $('clip-end').value = '0';
+    $('sequence-duration').textContent = '00:00.00'; $('output-duration').textContent = '00:00.00'; $('clip-count').textContent = '0 clips';
+    $('add-clip').disabled = !state.source;
+    updateSettings(); return;
+  }
+  if (!state.source || !selected) return;
   const duration = state.source.duration;
   if (!preserveInputs) { $('clip-start').value = String(Number(selected.start.toFixed(3))); $('clip-end').value = String(Number(selected.end.toFixed(3))); }
   $('selection').style.left = `${selected.start / duration * 100}%`;
@@ -135,28 +175,129 @@ function renderClips(preserveInputs = false) {
     $(id).setAttribute('aria-valuemax', String(duration)); $(id).setAttribute('aria-valuenow', value.toFixed(2)); $(id).setAttribute('aria-valuetext', time(value));
   }
   $('timeline-clips').innerHTML = state.clips.map((clip, i) => `<div class="timeline-region" style="left:${clip.start / duration * 100}%;width:${(clip.end - clip.start) / duration * 100}%"><span>${String(i + 1).padStart(2, '0')}</span></div>`).join('');
-  $('clip-list').innerHTML = state.clips.map((clip, i) => `<li class="clip-row ${state.selected === i ? 'selected' : ''}"><button class="clip-select" data-select="${i}" aria-label="Select clip ${i + 1}" aria-pressed="${state.selected === i}"><span class="clip-number">${String(i + 1).padStart(2, '0')}</span><span class="clip-times">${time(clip.start)} - ${time(clip.end)}</span><span class="clip-length">${(clip.end - clip.start).toFixed(2)}s</span></button><div class="clip-actions"><button data-move="${i}" data-direction="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move clip ${i + 1} earlier">Earlier</button><button data-move="${i}" data-direction="1" ${i === state.clips.length - 1 ? 'disabled' : ''} aria-label="Move clip ${i + 1} later">Later</button><button data-remove="${i}" ${state.clips.length === 1 ? 'disabled' : ''} aria-label="Remove clip ${i + 1}">Remove</button></div></li>`).join('');
+  $('clip-list').innerHTML = state.clips.map((clip, i) => `<li class="clip-row ${state.selected === i ? 'selected' : ''}"><button class="clip-select" data-select="${i}" aria-label="Select clip ${i + 1}" aria-pressed="${state.selected === i}"><span class="clip-number">${String(i + 1).padStart(2, '0')}</span><span class="clip-times">${time(clip.start)} - ${time(clip.end)}</span><span class="clip-length">${(clip.end - clip.start).toFixed(2)}s</span></button><div class="clip-actions"><button data-move="${i}" data-direction="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move clip ${i + 1} earlier">Earlier</button><button data-move="${i}" data-direction="1" ${i === state.clips.length - 1 ? 'disabled' : ''} aria-label="Move clip ${i + 1} later">Later</button><button data-remove="${i}" aria-label="Delete clip ${i + 1}">Delete</button></div></li>`).join('');
   const total = state.clips.reduce((sum, clip) => sum + clip.end - clip.start, 0);
   $('sequence-duration').textContent = time(total); $('output-duration').textContent = time(total);
   $('clip-count').textContent = `${state.clips.length} clip${state.clips.length === 1 ? '' : 's'}`;
   $('add-clip').disabled = state.clips.length >= 32;
-  updateSummary();
+  updateSettings();
 }
 function updateSummary() { if (state.source) $('export-description').textContent = `${state.clips.length} clip${state.clips.length === 1 ? '' : 's'} merged into one ${$('format').value.toUpperCase()} file.`; }
 function updateSettings() {
   const format = $('format').value;
   if (!isOutputFormat(format)) return;
-  const video = ['mp4', 'webm'].includes($('format').value);
+  const video = ['mp4', 'mkv', 'webm'].includes($('format').value);
   const lossless = ['wav', 'flac'].includes($('format').value);
   $('resolution').disabled = !video; $('quality').disabled = lossless;
   (['flip-h', 'flip-v'] as const).forEach(id => $(id).disabled = !state.source?.hasVideo);
   $('mute').disabled = !video || !state.source?.hasAudio;
   player.style.transform = `scale(${$('flip-h').checked ? -1 : 1}, ${$('flip-v').checked ? -1 : 1})`;
   player.muted = video && $('mute').checked;
-  $('format-description').textContent = { mp4: 'A good fit for sharing and everyday playback.', webm: 'An open video format for the web.', mp3: 'Compact audio for almost any player.', m4a: 'Efficient AAC audio in an M4A container.', wav: 'Uncompressed audio. Larger files, full fidelity.', flac: 'Lossless audio with a smaller footprint.' }[format];
-  $('export').disabled = !state.source || !state.engine || state.submitting;
-  $('render-preview').disabled = !state.source || !state.engine || state.submitting;
+  $('format-description').textContent = { mkv: 'Flexible video and audio codecs. Download to play in a desktop player.', mp4: 'A good fit for sharing and everyday playback.', webm: 'An open video format for the web.', mp3: 'Compact audio for almost any player.', m4a: 'Efficient AAC audio in an M4A container.', wav: 'Uncompressed audio. Larger files, full fidelity.', flac: 'Lossless audio with a smaller footprint.' }[format];
+  syncEncodingControls();
+  const selectedVideo = $('video-codec').value, selectedAudio = $('audio-codec').value;
+  const codecsReady = (!video || state.encoders.includes(selectedVideo)) && (!state.source?.hasAudio || (video && $('mute').checked) || state.encoders.includes(selectedAudio));
+  $('export').disabled = !state.source || !state.engine || state.submitting || !state.clips.length || !codecsReady;
+  $('render-preview').disabled = !state.source || !state.engine || state.submitting || !state.clips.length;
   updateSummary();
+}
+function resetEncoding() {
+  encodingDirty.clear(); previousVideoCodec = '';
+  $('rate-control').value = 'crf'; $('encoder-preset').value = 'medium'; $('frame-rate').value = 'original';
+  $('video-bitrate').value = '2500'; $('vp9-speed').value = '4';
+}
+function syncEncodingControls() {
+  const format = $('format').value, quality = $('quality').value;
+  if (!isOutputFormat(format) || !isQuality(quality)) return;
+  const fill = (select: HTMLSelectElement, choices: readonly (keyof typeof codecLabels)[]) => {
+    const old = select.value;
+    select.replaceChildren(...choices.map(codec => {
+      const option = new Option(codecLabels[codec] + (state.encoders.includes(codec) ? '' : ' (unavailable)'), codec);
+      option.disabled = !state.encoders.includes(codec); return option;
+    }));
+    select.value = choices.some(codec => codec === old && state.encoders.includes(codec)) ? old : choices.find(codec => state.encoders.includes(codec)) ?? choices[0] ?? '';
+  };
+  fill($('video-codec'), videoChoices[format]); fill($('audio-codec'), audioChoices[format]);
+  const codec = $('video-codec').value, audio = $('audio-codec').value;
+  const video = videoChoices[format].length > 0;
+  $('video-codec-field').hidden = !video; $('advanced-video').hidden = !video;
+  $('advanced-audio').hidden = !state.source?.hasAudio || (video && $('mute').checked);
+  $('audio-bitrate-field').hidden = ['flac', 'pcm_s16le'].includes(audio);
+  $('audio-bitrate').max = audio === 'libmp3lame' ? '320' : '512';
+  if (!encodingDirty.has('audio-bitrate')) $('audio-bitrate').value = String({ high: 256, balanced: 192, small: 128 }[quality]);
+  $('codec-help').textContent = codec === 'libx265' ? 'HEVC offers efficient compression. Browser playback support varies; use Render preview to inspect your cuts.' : codec === 'libvpx-vp9' ? 'VP9 supports constant quality or a target bitrate.' : 'H.264 offers broad playback compatibility.';
+  if (isVideoCodec(codec)) {
+    if (previousVideoCodec !== codec) { encodingDirty.delete('crf'); previousVideoCodec = codec; }
+    if (!encodingDirty.has('crf')) $('crf').value = String(defaultCrf(codec, quality));
+    $('crf').max = codec === 'libvpx-vp9' ? '63' : '51'; $('crf').step = codec === 'libvpx-vp9' ? '1' : '0.1';
+    $('crf-help').textContent = `Range 0–${$('crf').max}. Lower values preserve more detail and usually make larger files. Values are not comparable across codecs.`;
+  }
+  $('crf-field').hidden = $('rate-control').value !== 'crf'; $('video-bitrate-field').hidden = $('rate-control').value !== 'bitrate';
+  $('preset-field').hidden = codec === 'libvpx-vp9'; $('vp9-speed-field').hidden = codec !== 'libvpx-vp9';
+}
+function readEncoding(): EncodingOptions {
+  const result: EncodingOptions = {};
+  const format = $('format').value, codec = $('video-codec').value, audio = $('audio-codec').value;
+  if (!isOutputFormat(format)) throw new Error('Choose a container.');
+  if (videoChoices[format].length && isVideoCodec(codec)) {
+    result.videoCodec = codec;
+    result.rateControl = $('rate-control').value === 'bitrate' ? 'bitrate' : 'crf';
+    const number = (input: HTMLInputElement): number => {
+      if (!input.value || !input.checkValidity()) throw new Error(`Check ${input.labels?.[0]?.textContent ?? 'the encoding value'}.`);
+      return Number(input.value);
+    };
+    if (result.rateControl === 'bitrate') result.videoBitrateKbps = number($('video-bitrate'));
+    else if (encodingDirty.has('crf')) result.crf = number($('crf'));
+    const preset = $('encoder-preset').value;
+    if (codec === 'libvpx-vp9') result.cpuUsed = number($('vp9-speed'));
+    else if (isPreset(preset)) result.preset = preset;
+    if ($('frame-rate').value !== 'original') result.frameRate = Number($('frame-rate').value);
+  }
+  if (isAudioCodec(audio)) {
+    result.audioCodec = audio;
+    if (state.source?.hasAudio && (!videoChoices[format].length || !$('mute').checked) && !['flac', 'pcm_s16le'].includes(audio) && encodingDirty.has('audio-bitrate')) {
+      if (!$('audio-bitrate').value || !$('audio-bitrate').checkValidity()) throw new Error('Check the audio bitrate.');
+      result.audioBitrateKbps = Number($('audio-bitrate').value);
+    }
+  }
+  return result;
+}
+async function removeResource(url: string): Promise<void> {
+  await api(url, value => {
+    if (!isRecord(value) || typeof value.deleted !== 'string') throw new Error('Deletion could not be confirmed.');
+  }, { method: 'DELETE' });
+}
+function clearSource() {
+  player.pause(); stopSequence(); player.removeAttribute('src'); player.load();
+  state.source = null; state.clips = []; state.selected = 0;
+  $('source-title').textContent = 'Make the cut.'; $('source-kind').textContent = 'No file selected';
+  $('empty-view').hidden = false; $('media-view').hidden = true; $('playback-notice').hidden = true;
+  $('settings').disabled = true; $('play').disabled = true; $('scrubber').disabled = true;
+  $('scrubber').value = '0'; $('scrubber').max = '0'; $('total-time').textContent = '00:00.00';
+  $('current-time').textContent = '00:00.00'; $('source-info').textContent = 'Ready when you are';
+  $('playhead').hidden = true; $('timeline-empty').hidden = false;
+  $('ruler').innerHTML = Array.from({length: 5}, () => '<span>00:00</span>').join('');
+  $('export-description').textContent = 'Choose a source to get started.';
+  renderClips(); renderLibrary();
+}
+async function deleteUpload(id: string) {
+  const file = state.files.find(file => file.id === id);
+  if (!file || !window.confirm(`Delete uploaded file “${file.name}”? This permanently removes the source from this workspace. Finished exports are kept.`)) return;
+  try {
+    await removeResource(`/api/uploads/${id}`);
+    state.files = state.files.filter(file => file.id !== id);
+    if (state.source?.id === id) { const next = state.files[0]; if (next) selectFile(next); else clearSource(); }
+    renderLibrary(); toast('Uploaded file deleted. Finished exports are kept.');
+  } catch (error) { toast(errorMessage(error)); }
+}
+async function deleteJob(id: string) {
+  const job = state.jobs.find(job => job.id === id);
+  if (!job || !window.confirm(`Delete “${job.name}” and its export history? This permanently removes its output file.`)) return;
+  try {
+    await removeResource(`/api/jobs/${id}`);
+    if (state.pendingPreview === id) state.pendingPreview = null;
+    state.jobs = state.jobs.filter(job => job.id !== id); renderJobs(); toast('Export deleted.');
+  } catch (error) { toast(errorMessage(error)); }
 }
 function stopSequence() { state.sequencePlaying = false; $('play-edit').textContent = 'Play selected clips'; }
 function seek(value: number) { stopSequence(); if (state.source) { player.currentTime = Math.max(0, Math.min(state.source.duration, value)); updatePlayback(); } }
@@ -228,8 +369,8 @@ for (const edge of ['start', 'end'] as const) {
 }
 $('add-clip').onclick = () => {
   const selected = state.clips[state.selected];
-  if (!state.source || !selected || state.clips.length >= 32) return;
-  stopSequence(); const duration = state.source.duration; const end = selected.end;
+  if (!state.source || state.clips.length >= 32) return;
+  stopSequence(); const duration = state.source.duration; const end = selected?.end ?? Math.min(player.currentTime, duration - .04);
   const start = end < duration - .04 ? end : 0;
   state.clips.push({ start, end: Math.min(start + 5, duration) }); state.selected = state.clips.length - 1; seek(start); renderClips();
 };
@@ -245,7 +386,7 @@ $('clip-list').onclick = event => {
   const button = event.target.closest('button'); if (!button) return;
   stopSequence();
   if (button.dataset.select !== undefined) { state.selected = Number(button.dataset.select); const selected = state.clips[state.selected]; if (selected) seek(selected.start); }
-  if (button.dataset.remove !== undefined && state.clips.length > 1) { state.clips.splice(Number(button.dataset.remove), 1); state.selected = Math.min(state.selected, state.clips.length - 1); }
+  if (button.dataset.remove !== undefined) { player.pause(); state.clips.splice(Number(button.dataset.remove), 1); state.selected = Math.max(0, Math.min(state.selected, state.clips.length - 1)); }
   if (button.dataset.move !== undefined) {
     const from = Number(button.dataset.move), to = from + Number(button.dataset.direction);
     if (to < 0 || to >= state.clips.length) return;
@@ -255,9 +396,16 @@ $('clip-list').onclick = event => {
   }
   renderClips();
 };
-$('settings').onchange = updateSettings;
+$('settings').onchange = event => {
+  if (event.target instanceof HTMLElement && $('advanced-settings').contains(event.target)) encodingDirty.add(event.target.id);
+  updateSettings();
+};
+$('advanced-settings').addEventListener('input', event => { if (event.target instanceof HTMLInputElement) encodingDirty.add(event.target.id); });
+$('reset-encoding').onclick = () => { resetEncoding(); updateSettings(); };
 $('file-list').onclick = event => {
   if (!(event.target instanceof Element)) return;
+  const deletion = event.target.closest<HTMLButtonElement>('[data-delete-upload]');
+  if (deletion?.dataset.deleteUpload) { void deleteUpload(deletion.dataset.deleteUpload); return; }
   const button = event.target.closest<HTMLButtonElement>('[data-file]');
   const file = state.files.find(file => file.id === button?.dataset.file);
   if (file) selectFile(file);
@@ -289,12 +437,12 @@ async function uploadFiles(files: File[]) {
   state.uploading = false; $('upload-status').textContent = '';
 }
 async function submit(preview: boolean) {
-  if (!state.source || state.submitting) return;
+  if (!state.source || state.submitting || !state.clips.length) return;
   state.submitting = true; updateSettings();
   try {
     const format = $('format').value, quality = $('quality').value, resolution = $('resolution').value;
     if (!isOutputFormat(format) || !isQuality(quality) || !isResolution(resolution)) throw new Error('Choose valid export settings.');
-    const request: EditRequest = { uploadId: state.source.id, clips: state.clips, format, quality, resolution, flipH: $('flip-h').checked, flipV: $('flip-v').checked, mute: $('mute').checked, preview };
+    const request: EditRequest = { ...readEncoding(), uploadId: state.source.id, clips: state.clips, format, quality, resolution, flipH: $('flip-h').checked, flipV: $('flip-v').checked, mute: $('mute').checked, preview };
     const job = await post('/api/jobs', request);
     if (preview) state.pendingPreview = job.id;
     state.jobs.unshift(job); renderJobs(); toast(preview ? 'Rendering your preview. It will open when ready.' : 'Export added to the queue.');
@@ -306,13 +454,13 @@ $('export').onclick = () => void submit(false); $('render-preview').onclick = ()
 function renderJobs() {
   $('job-count').textContent = String(state.jobs.length); $('jobs-empty').hidden = state.jobs.length > 0;
   const focused = document.activeElement instanceof HTMLElement ? document.activeElement.dataset : undefined;
-  $('job-list').innerHTML = state.jobs.map(job => `<article class="job"><div><div class="job-name">${escape(job.name)}</div><div class="job-meta">${job.edit.preview ? 'PREVIEW' : job.edit.format.toUpperCase()} · ${time(job.edit.duration)} · ${job.edit.clips.length} clip${job.edit.clips.length === 1 ? '' : 's'}${job.bytes ? ' · ' + size(job.bytes) : ''}</div></div><div class="job-status ${job.status}">${{ queued: 'Waiting in queue', running: `Processing · ${job.progress}%`, completed: 'Ready to download', failed: 'Export failed', cancelled: 'Cancelled' }[job.status]}${['queued', 'running'].includes(job.status) ? `<progress max="100" value="${job.progress}" aria-label="Export progress"></progress>` : ''}</div><div class="job-actions">${job.status === 'completed' ? `<button class="button subtle" data-preview="${job.id}">Play</button><a class="button subtle" href="/results/${job.id}?download" download>Download</a>` : ['queued', 'running'].includes(job.status) ? `<button class="button subtle" data-cancel="${job.id}">Cancel</button>` : ''}</div>${job.error ? `<p class="job-error">${escape(job.error)}</p>` : ''}</article>`).join('');
+  $('job-list').innerHTML = state.jobs.map(job => `<article class="job"><div><div class="job-name">${escape(job.name)}</div><div class="job-meta">${job.edit.preview ? 'PREVIEW' : job.edit.format.toUpperCase()}${job.edit.videoCodec ? ' · ' + escape(codecLabels[job.edit.videoCodec]) : ''}${job.edit.videoCodec && job.edit.rateControl === 'crf' ? ' · CRF ' + job.edit.crf : ''}${job.edit.videoCodec && job.edit.rateControl === 'bitrate' ? ' · ' + job.edit.videoBitrateKbps + ' kbps' : ''} · ${time(job.edit.duration)} · ${job.edit.clips.length} clip${job.edit.clips.length === 1 ? '' : 's'}${job.bytes ? ' · ' + size(job.bytes) : ''}</div></div><div class="job-status ${job.status}">${{ queued: 'Waiting in queue', running: `Processing · ${job.progress}%`, completed: 'Ready to download', failed: 'Export failed', cancelled: 'Cancelled' }[job.status]}${['queued', 'running'].includes(job.status) ? `<progress max="100" value="${job.progress}" aria-label="Export progress"></progress>` : ''}</div><div class="job-actions">${job.status === 'completed' ? `<button class="button subtle" data-preview="${job.id}">Play</button><a class="button subtle" href="/results/${job.id}?download" download>Download</a><button class="button subtle danger" data-delete-job="${job.id}">Delete</button>` : ['queued', 'running'].includes(job.status) ? `<button class="button subtle" data-cancel="${job.id}">Cancel</button>` : `<button class="button subtle danger" data-delete-job="${job.id}">Delete</button>`}</div>${job.error ? `<p class="job-error">${escape(job.error)}</p>` : ''}</article>`).join('');
   if (focused?.preview) document.querySelector<HTMLButtonElement>(`[data-preview="${focused.preview}"]`)?.focus({ preventScroll: true });
   if (focused?.cancel) document.querySelector<HTMLButtonElement>(`[data-cancel="${focused.cancel}"]`)?.focus({ preventScroll: true });
 }
 function openResult(job: Job) {
   player.pause(); stopSequence(); $('result-title').textContent = job.name; $('result-player').src = `/results/${job.id}`;
-  $('result-player').classList.toggle('audio-result', !['mp4', 'webm'].includes(job.edit.format));
+  $('result-player').classList.toggle('audio-result', !['mp4', 'mkv', 'webm'].includes(job.edit.format));
   $('result-download').href = `/results/${job.id}?download`; $('result-notice').hidden = true;
   $('result-dialog').showModal(); $('result-player').play().catch(() => {});
 }
@@ -322,6 +470,7 @@ $('result-dialog').addEventListener('close', () => { $('result-player').pause();
 $('job-list').onclick = async event => {
   if (!(event.target instanceof Element)) return;
   const button = event.target.closest('button'); if (!button) return;
+  if (button.dataset.deleteJob) { await deleteJob(button.dataset.deleteJob); return; }
   if (button.dataset.preview) { const job = state.jobs.find(job => job.id === button.dataset.preview); if (job) openResult(job); }
   if (button.dataset.cancel) { try { await post(`/api/jobs/${button.dataset.cancel}/cancel`); await refreshJobs(); } catch (error) { toast(errorMessage(error)); } }
 };
@@ -334,7 +483,7 @@ async function refreshJobs() {
 async function init() {
   try {
     const [health, files, jobs] = await Promise.all([api('/api/health', parseHealth), api('/api/uploads', value => parseList(value, parseMediaFile)), api('/api/jobs', value => parseList(value, parseJob))]);
-    state.engine = health.available; state.files = files; state.jobs = jobs;
+    state.engine = health.available; state.encoders = health.encoders ?? []; state.files = files; state.jobs = jobs;
     $('engine').textContent = health.available ? 'Local engine ready' : 'FFmpeg unavailable'; $('engine').classList.toggle('ready', health.available);
     renderLibrary(); renderJobs(); if (files[0]) selectFile(files[0]);
     if (!health.available) toast('Install FFmpeg and FFprobe, then restart the server.');

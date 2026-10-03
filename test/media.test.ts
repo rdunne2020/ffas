@@ -150,3 +150,69 @@ test('network mode accepts the machine hostname and retains origin checks', asyn
     assert.equal(await status({ Host: 'untrusted.example' }), 403);
   } finally { networkApp.stop(); }
 });
+
+
+test('exports x265 with custom CRF, preset and frame rate', async () => {
+  const job = await finish({ uploadId: video.id, clips: [{ start: 0, end: 1 }], format: 'mp4', videoCodec: 'libx265', crf: 21.5, preset: 'fast', frameRate: 12, audioBitrateKbps: 96 });
+  const metadata = await outputMetadata(job);
+  assert.equal(metadata.videoCodec, 'hevc'); assert.equal(metadata.audioCodec, 'aac');
+  assert.equal(job.edit.crf, 21.5); assert.equal(job.edit.preset, 'fast');
+  const { stdout } = await exec('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=r_frame_rate,codec_tag_string', '-of', 'json', path.join(dir, `result-${job.id}.mp4`)]);
+  const stream = JSON.parse(stdout).streams[0];
+  assert.equal(stream.r_frame_rate, '12/1'); assert.equal(stream.codec_tag_string, 'hvc1');
+});
+test('exports MKV with FLAC audio and video target bitrate', async () => {
+  const job = await finish({ uploadId: video.id, clips: [{ start: 0, end: 1 }], format: 'mkv', videoCodec: 'libx264', audioCodec: 'flac', rateControl: 'bitrate', videoBitrateKbps: 500, preset: 'veryfast' });
+  const metadata = await outputMetadata(job);
+  assert.equal(metadata.videoCodec, 'h264'); assert.equal(metadata.audioCodec, 'flac'); assert.equal(job.edit.videoBitrateKbps, 500);
+});
+test('preview stays browser-compatible when export selects HEVC and custom settings', async () => {
+  const job = await finish({ uploadId: video.id, clips: [{ start: 0, end: 1 }], format: 'mkv', videoCodec: 'libx265', audioCodec: 'flac', crf: 32, rateControl: 'bitrate', preset: 'slow', preview: true });
+  const metadata = await outputMetadata(job);
+  assert.equal(metadata.videoCodec, 'h264'); assert.equal(metadata.audioCodec, 'aac');
+  assert.equal(job.edit.rateControl, 'crf'); assert.equal(job.edit.crf, 23); assert.equal(job.edit.preset, 'ultrafast');
+});
+test('rejects incompatible codecs and out-of-range encoder controls', async () => {
+  const good = { uploadId: video.id, clips: [{ start: 0, end: 1 }], format: 'mp4' };
+  for (const extra of [
+    { videoCodec: 'arbitrary' }, { videoCodec: 'libvpx-vp9' }, { audioCodec: 'flac' },
+    { format: 'webm', videoCodec: 'libx265' }, { crf: 52 }, { crf: -1 }, { crf: '23' },
+    { preset: 'unsafe' }, { rateControl: 'unknown' }, { videoBitrateKbps: 0 }, { audioBitrateKbps: 1000 },
+    { format: 'mp3', audioBitrateKbps: 321 }, { frameRate: 0 }, { frameRate: 121 }, { cpuUsed: 6 },
+    { format: 'webm', crf: 32.5 },
+  ]) assert.equal((await request('/api/jobs', { ...good, ...extra })).status, 400, JSON.stringify(extra));
+});
+test('deleting a source keeps its output; deleting an export removes its files and survives restart', async () => {
+  const source = await upload('video.mp4');
+  const job = await finish({ uploadId: source.id, clips: [{ start: 0, end: 1 }], format: 'mp4' });
+  assert.equal((await fetch(`${base}/api/uploads/${source.id}`, { method: 'DELETE' })).status, 200);
+  assert.equal((await fetch(`${base}/media/${source.id}`)).status, 404);
+  const output = await fetch(`${base}/results/${job.id}`); assert.equal(output.status, 200); await output.arrayBuffer();
+  assert.equal((await request('/api/jobs', { uploadId: source.id, clips: [{ start: 0, end: 1 }], format: 'mp4' })).status, 404);
+  assert.equal((await fetch(`${base}/api/jobs/${job.id}`, { method: 'DELETE', headers: { Origin: 'https://untrusted.example' } })).status, 403);
+  assert.equal((await fetch(`${base}/api/jobs/${job.id}`, { method: 'DELETE' })).status, 200);
+  assert.equal((await fetch(`${base}/results/${job.id}`)).status, 404);
+  for (const filename of [`uploads/${source.id}.mp4`, `uploads/${source.id}.json`, `jobs/${job.id}.mp4`, `jobs/${job.id}.json`]) {
+    await assert.rejects(readFile(path.join(dir, 'data', filename)), { code: 'ENOENT' });
+  }
+  app.stop(); app = await createApp({ dataDir: path.join(dir, 'data') });
+  await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
+  assert.ok(!parseList((await request('/api/uploads')).data, parseMediaFile).some(file => file.id === source.id));
+  assert.ok(!parseList((await request('/api/jobs')).data, parseJob).some(item => item.id === job.id));
+});
+test('in-use sources and unfinished exports cannot be deleted', async () => {
+  const edit = { uploadId: video.id, clips: Array.from({ length: 32 }, () => ({ start: 0, end: 4 })), format: 'webm' };
+  const first = parseJob((await request('/api/jobs', edit)).data);
+  const second = parseJob((await request('/api/jobs', edit)).data);
+  assert.equal((await fetch(`${base}/api/uploads/${video.id}`, { method: 'DELETE' })).status, 409);
+  assert.equal((await fetch(`${base}/api/jobs/${first.id}`, { method: 'DELETE' })).status, 409);
+  assert.equal((await fetch(`${base}/api/jobs/${second.id}`, { method: 'DELETE' })).status, 409);
+  await request(`/api/jobs/${second.id}/cancel`, {}); await request(`/api/jobs/${first.id}/cancel`, {});
+  for (let i = 0; i < 100; i++) {
+    const response = await fetch(`${base}/api/jobs/${first.id}`, { method: 'DELETE' });
+    if (response.status === 200) break;
+    assert.equal(response.status, 409); if (i === 99) assert.fail('Cancelled worker did not stop'); await delay(20);
+  }
+  assert.equal((await fetch(`${base}/api/jobs/${second.id}`, { method: 'DELETE' })).status, 200);
+});

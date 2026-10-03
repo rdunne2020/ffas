@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseMediaFile, parseJob, parseHealth, parseList } from '../shared/model.js';
-import { validateEdit } from '../lib/media.js';
+import { buildCommand, validateEdit } from '../lib/media.js';
 
 test('JSON boundaries reject malformed responses and unsafe stored paths', () => {
   for (const value of [null, [], 'media', { id: '../../file' }]) assert.throws(() => parseMediaFile(value));
@@ -29,4 +29,14 @@ test('stored JavaScript-era records retain their schema through typed parsing', 
   assert.deepEqual(parseJob(JSON.parse(JSON.stringify(job))), job);
   assert.throws(() => parseMediaFile({ ...media, extension: '/../outside' }));
   assert.throws(() => parseJob({ ...job, edit: { ...job.edit, format: '../../outside' } }));
+});
+
+
+test('CRF zero is preserved and target bitrate omits CRF', () => {
+  const media = { duration: 4, hasVideo: true, hasAudio: true, videoIndex: 0, audioIndex: 1 };
+  const base = { clips: [{ start: 0, end: 1 }], format: 'mp4', videoCodec: 'libx265' };
+  const crf = buildCommand(media, validateEdit({ ...base, crf: 0 }, media), 'input.mp4', 'output.mp4');
+  assert.equal(crf[crf.indexOf('-crf') + 1], '0');
+  const bitrate = buildCommand(media, validateEdit({ ...base, rateControl: 'bitrate', videoBitrateKbps: 1200 }, media), 'input.mp4', 'output.mp4');
+  assert.equal(bitrate[bitrate.indexOf('-b:v') + 1], '1200k'); assert.ok(!bitrate.includes('-crf'));
 });

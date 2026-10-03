@@ -1,3 +1,7 @@
+import type { IncomingMessage, ServerResponse, OutgoingHttpHeaders } from 'node:http';
+import type { ChildProcess } from 'node:child_process';
+import type { MediaFile, Job } from './shared/model.js';
+import { isRecord, errorMessage, parseMediaFile, parseJob } from './shared/model.js';
 import http from 'node:http';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, readFile, writeFile, readdir, stat, rm } from 'node:fs/promises';
@@ -8,21 +12,21 @@ import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { probe, validateEdit, buildCommand, formats } from './lib/media.mjs';
+import { probe, validateEdit, buildCommand, formats } from './lib/media.js';
 
-const root = path.dirname(fileURLToPath(import.meta.url));
+const root = fileURLToPath(new URL('../', import.meta.url));
 const exec = promisify(execFile);
 const uuid = /^[a-f0-9-]{36}$/;
-const contentTypes = { '.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.svg': 'image/svg+xml', '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm', '.mkv': 'video/x-matroska', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.flac': 'audio/flac', '.m4a': 'audio/mp4', '.ogg': 'audio/ogg', '.aac': 'audio/aac' };
-function json(res, status, data) { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)); }
-async function body(req) {
+const contentTypes: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.svg': 'image/svg+xml', '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm', '.mkv': 'video/x-matroska', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.flac': 'audio/flac', '.m4a': 'audio/mp4', '.ogg': 'audio/ogg', '.aac': 'audio/aac' };
+function json(res: ServerResponse, status: number, data: unknown) { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)); }
+async function body(req: IncomingMessage): Promise<unknown> {
   let data = '';
   for await (const chunk of req) { data += chunk; if (data.length > 32768) throw new Error('Request is too large.'); }
   try { return JSON.parse(data); } catch { throw new Error('Invalid JSON request.'); }
 }
-async function serveFile(req, res, filename, type, downloadName) {
+async function serveFile(req: IncomingMessage, res: ServerResponse, filename: string, type: string, downloadName?: string | null) {
   const { size } = await stat(filename);
-  const headers = { 'Content-Type': type, 'Accept-Ranges': 'bytes', 'Content-Length': size };
+  const headers: OutgoingHttpHeaders = { 'Content-Type': type, 'Accept-Ranges': 'bytes', 'Content-Length': size };
   if (downloadName) headers['Content-Disposition'] = `attachment; filename="export${path.extname(filename)}"; filename*=UTF-8''${encodeURIComponent(downloadName).replace(/'/g, '%27')}`;
   let start = 0, end = size - 1, status = 200;
   if (req.headers.range) {
@@ -39,40 +43,58 @@ async function serveFile(req, res, filename, type, downloadName) {
   if (req.method === 'HEAD') { res.end(); return; }
   await pipeline(createReadStream(filename, { start, end }), res);
 }
-export async function createApp({ dataDir = path.join(root, '.data'), maxUploadBytes = 1024 ** 3 } = {}) {
+export interface AppOptions { dataDir?: string; maxUploadBytes?: number }
+export async function createApp({ dataDir = path.join(root, '.data'), maxUploadBytes = 1024 ** 3 }: AppOptions = {}) {
   await mkdir(dataDir, { recursive: true });
   await Promise.all(['uploads', 'jobs'].map(dir => mkdir(path.join(dataDir, dir), { recursive: true })));
-  const uploads = new Map(), jobs = new Map();
-  let active = null, uploadCount = 0, stopping = false;
+  const uploads = new Map<string, MediaFile>(), jobs = new Map<string, Job>();
+  let active: { job: Job; child: ChildProcess } | null = null;
+  let uploadCount = 0, stopping = false;
   let available = true;
   try { await Promise.all(['ffmpeg', 'ffprobe'].map(bin => exec(bin, ['-version'], { timeout: 5000 }))); } catch { available = false; }
-  const save = (kind, record) => writeFile(path.join(dataDir, kind, `${record.id}.json`), JSON.stringify(record, null, 2));
-  for (const [kind, records] of [['uploads', uploads], ['jobs', jobs]]) {
+  const save = (kind: 'uploads' | 'jobs', record: MediaFile | Job) => writeFile(path.join(dataDir, kind, `${record.id}.json`), JSON.stringify(record, null, 2));
+  for (const kind of ['uploads', 'jobs'] as const) {
     for (const name of await readdir(path.join(dataDir, kind))) {
       if (!name.endsWith('.json')) continue;
       try {
-        const record = JSON.parse(await readFile(path.join(dataDir, kind, name), 'utf8'));
-        if (kind === 'jobs' && ['queued', 'running'].includes(record.status)) { record.status = 'failed'; record.error = 'The server stopped before this job finished. Submit the edit again.'; await save(kind, record); }
-        records.set(record.id, record);
-      } catch { /* Ignore incomplete metadata from an interrupted write. */ }
+        const value: unknown = JSON.parse(await readFile(path.join(dataDir, kind, name), 'utf8'));
+        if (kind === 'uploads') {
+          const record = parseMediaFile(value);
+          uploads.set(record.id, record);
+        } else {
+          const record = parseJob(value);
+          if (['queued', 'running'].includes(record.status)) {
+            record.status = 'failed';
+            record.error = 'The server stopped before this job finished. Submit the edit again.';
+            await save(kind, record);
+          }
+          jobs.set(record.id, record);
+        }
+      } catch { /* Ignore incomplete or invalid metadata from an interrupted write. */ }
     }
   }
-  const sourcePath = m => path.join(dataDir, 'uploads', `${m.id}${m.extension}`);
-  const resultPath = j => path.join(dataDir, 'jobs', `${j.id}.${j.edit.format}`);
+  const sourcePath = (m: MediaFile) => path.join(dataDir, 'uploads', `${m.id}${m.extension}`);
+  const resultPath = (j: Job) => path.join(dataDir, 'jobs', `${j.id}.${j.edit.format}`);
   async function runNext() {
     if (active || stopping) return;
     const job = [...jobs.values()].find(j => j.status === 'queued');
     if (!job) return;
     job.status = 'running';
     job.startedAt = new Date().toISOString();
-    const child = spawn('ffmpeg', buildCommand(uploads.get(job.uploadId), job.edit, sourcePath(uploads.get(job.uploadId)), resultPath(job)), { stdio: ['ignore', 'pipe', 'pipe'] });
+    const media = uploads.get(job.uploadId);
+    if (!media) {
+      job.status = 'failed'; job.error = 'Source file not found. Upload it again.';
+      await save('jobs', job); void runNext(); return;
+    }
+    const child = spawn('ffmpeg', buildCommand(media, job.edit, sourcePath(media), resultPath(job)), { stdio: ['ignore', 'pipe', 'pipe'] });
     active = { job, child };
-    let stderr = '', progressBuffer = '', spawnError, timedOut = false;
+    let stderr = '', progressBuffer = '', timedOut = false;
+    let spawnError: Error | undefined;
     const timeout = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 60 * 60 * 1000);
     child.stderr.on('data', data => { stderr = (stderr + data.toString()).slice(-6000); });
     child.stdout.on('data', data => {
       progressBuffer += data.toString();
-      const lines = progressBuffer.split('\n'); progressBuffer = lines.pop();
+      const lines = progressBuffer.split('\n'); progressBuffer = lines.pop() ?? '';
       for (const line of lines) if (line.startsWith('out_time_us=')) job.progress = Math.min(99, Math.max(0, Math.round(Number(line.slice(12)) / (job.edit.duration * 10000))));
     });
     child.on('error', error => { spawnError = error; });
@@ -87,10 +109,10 @@ export async function createApp({ dataDir = path.join(root, '.data'), maxUploadB
         if (job.status !== 'completed') await rm(resultPath(job), { force: true });
         job.finishedAt = new Date().toISOString();
         await save('jobs', job);
-      } catch (error) { job.status = 'failed'; job.error = 'Could not save the output. Check available disk space.'; console.error(error.message); }
+      } catch (error) { job.status = 'failed'; job.error = 'Could not save the output. Check available disk space.'; console.error(errorMessage(error)); }
       finally { active = null; void runNext(); }
     });
-    await save('jobs', job).catch(error => console.error(error.message));
+    await save('jobs', job).catch(error => console.error(errorMessage(error)));
   }
   const server = http.createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -102,7 +124,7 @@ export async function createApp({ dataDir = path.join(root, '.data'), maxUploadB
       if (!host || !/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host)) return json(res, 403, { error: 'Only localhost connections are supported.' });
       if (req.headers.origin && req.headers.origin !== `http://${host}`) return json(res, 403, { error: 'Cross-origin requests are not allowed.' });
       if (req.headers['sec-fetch-site'] === 'cross-site') return json(res, 403, { error: 'Cross-site requests are not allowed.' });
-      const url = new URL(req.url, `http://${host}`);
+      const url = new URL(req.url ?? '/', `http://${host}`);
       const pathname = url.pathname;
       if (req.method === 'GET' && pathname === '/api/health') return json(res, 200, { available, maxUploadBytes });
       if (req.method === 'GET' && pathname === '/api/uploads') return json(res, 200, [...uploads.values()].reverse());
@@ -112,7 +134,7 @@ export async function createApp({ dataDir = path.join(root, '.data'), maxUploadB
         if (uploadCount >= 2) return json(res, 429, { error: 'Two uploads are already in progress. Try again shortly.' });
         if (Number(req.headers['content-length']) > maxUploadBytes) return json(res, 413, { error: 'The upload limit is 1 GB.' });
         let name;
-        try { name = decodeURIComponent(req.headers['x-file-name'] || 'media'); } catch { throw new Error('Invalid filename.'); }
+        try { const filenameHeader = req.headers['x-file-name']; if (Array.isArray(filenameHeader)) throw new Error('Invalid filename.'); name = decodeURIComponent(filenameHeader || 'media'); } catch { throw new Error('Invalid filename.'); }
         name = path.basename(name).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 180) || 'media';
         const candidate = path.extname(name).toLowerCase();
         const extension = /^\.[a-z0-9]{1,8}$/.test(candidate) ? candidate : '.bin';
@@ -134,15 +156,17 @@ export async function createApp({ dataDir = path.join(root, '.data'), maxUploadB
       if (req.method === 'POST' && pathname === '/api/jobs') {
         if (!available) return json(res, 503, { error: 'FFmpeg is unavailable.' });
         if ([...jobs.values()].filter(j => ['queued', 'running'].includes(j.status)).length >= 8) return json(res, 429, { error: 'The queue is full. Wait for an export to finish.' });
-        const request = await body(req), media = uploads.get(request.uploadId);
+        const request = await body(req);
+        if (!isRecord(request) || typeof request.uploadId !== 'string') throw new Error('Invalid upload ID.');
+        const media = uploads.get(request.uploadId);
         if (!media) return json(res, 404, { error: 'Source file not found. Upload it again.' });
         const edit = validateEdit(request, media);
-        const job = { id: randomUUID(), uploadId: media.id, name: media.name.replace(/\.[^.]+$/, '') + (edit.preview ? '-preview.' : '-edited.') + edit.format, edit, status: 'queued', progress: 0, createdAt: new Date().toISOString() };
+        const job: Job = { id: randomUUID(), uploadId: media.id, name: media.name.replace(/\.[^.]+$/, '') + (edit.preview ? '-preview.' : '-edited.') + edit.format, edit, status: 'queued', progress: 0, createdAt: new Date().toISOString() };
         await save('jobs', job); jobs.set(job.id, job);
         json(res, 202, job); void runNext(); return;
       }
       const cancel = /^\/api\/jobs\/([a-f0-9-]+)\/cancel$/.exec(pathname);
-      if (req.method === 'POST' && cancel) {
+      if (req.method === 'POST' && cancel?.[1]) {
         const job = jobs.get(cancel[1]);
         if (!job) return json(res, 404, { error: 'Job not found.' });
         if (['queued', 'running'].includes(job.status)) {
@@ -153,20 +177,28 @@ export async function createApp({ dataDir = path.join(root, '.data'), maxUploadB
         return json(res, 200, job);
       }
       const file = /^\/(media|results)\/([a-f0-9-]+)$/.exec(pathname);
-      if (['GET', 'HEAD'].includes(req.method) && file && uuid.test(file[2])) {
-        const record = (file[1] === 'media' ? uploads : jobs).get(file[2]);
-        if (!record || (file[1] === 'results' && record.status !== 'completed')) return json(res, 404, { error: 'File not found.' });
-        await serveFile(req, res, file[1] === 'media' ? sourcePath(record) : resultPath(record), file[1] === 'media' ? (contentTypes[record.extension] || 'application/octet-stream') : formats[record.edit.format].mime, url.searchParams.has('download') ? record.name : null); return;
+      if (['GET', 'HEAD'].includes(req.method ?? '') && file?.[2] && uuid.test(file[2])) {
+        if (file[1] === 'media') {
+          const media = uploads.get(file[2]);
+          if (!media) return json(res, 404, { error: 'File not found.' });
+          await serveFile(req, res, sourcePath(media), contentTypes[media.extension] ?? 'application/octet-stream', url.searchParams.has('download') ? media.name : null);
+        } else {
+          const job = jobs.get(file[2]);
+          if (!job || job.status !== 'completed') return json(res, 404, { error: 'File not found.' });
+          await serveFile(req, res, resultPath(job), formats[job.edit.format].mime, url.searchParams.has('download') ? job.name : null);
+        }
+        return;
       }
-      const staticFiles = { '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/favicon.svg': 'favicon.svg' };
-      if (['GET', 'HEAD'].includes(req.method) && Object.hasOwn(staticFiles, pathname)) {
-        const filename = staticFiles[pathname];
-        await serveFile(req, res, path.join(root, 'public', filename), contentTypes[path.extname(filename)]); return;
+      const staticFiles: Record<string, string> = { '/': 'public/index.html', '/app.js': 'dist/public/app.js', '/shared/model.js': 'dist/shared/model.js', '/style.css': 'public/style.css', '/favicon.svg': 'public/favicon.svg' };
+      const filename = staticFiles[pathname];
+      if (['GET', 'HEAD'].includes(req.method ?? '') && Object.hasOwn(staticFiles, pathname) && filename) {
+        await serveFile(req, res, path.join(root, filename), contentTypes[path.extname(filename)] ?? 'application/octet-stream'); return;
       }
       json(res, 404, { error: 'Not found.' });
     } catch (error) {
       if (res.headersSent || res.destroyed) return;
-      json(res, error.code === 'ENOENT' ? 404 : 400, { error: error.code === 'ENOENT' ? 'File no longer exists.' : error.message });
+      const missing = isRecord(error) && error.code === 'ENOENT';
+      json(res, missing ? 404 : 400, { error: missing ? 'File no longer exists.' : errorMessage(error) });
     }
   });
   server.requestTimeout = 30 * 60 * 1000;
@@ -176,7 +208,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const port = Number(process.env.PORT || 3000);
   const app = await createApp({ dataDir: process.env.FFAS_DATA_DIR || undefined });
   app.server.listen(port, '127.0.0.1', () => console.log(`FFAS is ready at http://localhost:${port}`));
-  app.server.on('error', error => { console.error(error.message); process.exitCode = 1; });
+  app.server.on('error', error => { console.error(errorMessage(error)); process.exitCode = 1; });
   process.on('SIGINT', () => app.stop());
   process.on('SIGTERM', () => app.stop());
 }

@@ -1,3 +1,5 @@
+import type { MediaMetadata, Edit } from '../shared/model.js';
+import { isRecord, isClip, isOutputFormat, isQuality, isResolution } from '../shared/model.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const exec = promisify(execFile);
@@ -12,29 +14,35 @@ export const formats = {
   flac: { extension: 'flac', mime: 'audio/flac', video: false },
   m4a: { extension: 'm4a', mime: 'audio/mp4', video: false },
 };
-export async function probe(path) {
+export async function probe(path: string): Promise<MediaMetadata> {
   const { stdout } = await exec('ffprobe', ['-v', 'error', ...inputOptions, '-show_format', '-show_streams', '-of', 'json', path], { timeout: 30000, maxBuffer: 2 * 1024 * 1024 });
-  const info = JSON.parse(stdout);
-  const video = info.streams.find(s => s.codec_type === 'video' && !s.disposition?.attached_pic);
-  const audio = info.streams.find(s => s.codec_type === 'audio');
+  const info: unknown = JSON.parse(stdout);
+  if (!isRecord(info) || !Array.isArray(info.streams) || !isRecord(info.format)) throw new Error('Invalid FFprobe response.');
+  const streams = info.streams.filter(isRecord);
+  const video = streams.find(s => s.codec_type === 'video' && !(isRecord(s.disposition) && s.disposition.attached_pic));
+  const audio = streams.find(s => s.codec_type === 'audio');
   const duration = Number(info.format.duration || video?.duration || audio?.duration);
   if ((!video && !audio) || !Number.isFinite(duration) || duration <= 0 || duration > 24 * 3600) throw new Error('Choose a playable video or audio file under 24 hours long.');
-  return { duration, hasVideo: !!video, hasAudio: !!audio, videoIndex: video?.index, audioIndex: audio?.index, width: video?.width, height: video?.height, videoCodec: video?.codec_name, audioCodec: audio?.codec_name };
+  const number = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  const text = (value: unknown): string | undefined => typeof value === 'string' ? value : undefined;
+  if ((video && number(video.index) === undefined) || (audio && number(audio.index) === undefined)) throw new Error('Invalid stream index.');
+  return { duration, hasVideo: !!video, hasAudio: !!audio, videoIndex: number(video?.index), audioIndex: number(audio?.index), width: number(video?.width), height: number(video?.height), videoCodec: text(video?.codec_name), audioCodec: text(audio?.codec_name) };
 }
-export function validateEdit(body, media) {
+export function validateEdit(body: unknown, media: MediaMetadata): Edit {
+  if (!isRecord(body)) throw new Error('Invalid edit request.');
   const format = body.preview ? (media.hasVideo ? 'mp4' : 'm4a') : body.format;
-  if (!Object.hasOwn(formats, format)) throw new Error('Choose a supported output format.');
+  if (!isOutputFormat(format)) throw new Error('Choose a supported output format.');
   if (formats[format].video && !media.hasVideo) throw new Error('This file has no video. Choose an audio format.');
   if (!formats[format].video && !media.hasAudio) throw new Error('This file has no audio to export.');
   const quality = body.quality ?? 'balanced';
   const resolution = body.preview ? '720' : (body.resolution ?? 'original');
-  if (!['high', 'balanced', 'small'].includes(quality)) throw new Error('Invalid quality.');
-  if (!['original', '1080', '720', '480'].includes(resolution)) throw new Error('Invalid resolution.');
+  if (!isQuality(quality)) throw new Error('Invalid quality.');
+  if (!isResolution(resolution)) throw new Error('Invalid resolution.');
   for (const key of ['flipH', 'flipV', 'mute', 'preview']) if (body[key] !== undefined && typeof body[key] !== 'boolean') throw new Error(`Invalid ${key} setting.`);
   const clips = body.clips;
   if (!Array.isArray(clips) || clips.length < 1 || clips.length > 32) throw new Error('Select between 1 and 32 clips.');
   const normalized = clips.map(clip => {
-    if (!clip || typeof clip.start !== 'number' || typeof clip.end !== 'number') throw new Error('Clip times must be numbers.');
+    if (!isClip(clip)) throw new Error('Clip times must be numbers.');
     const { start, end } = clip;
     if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end > media.duration + 0.02 || end - start < 0.04) throw new Error('Each clip must be at least 0.04 seconds and stay within the source.');
     return { start, end: Math.min(end, media.duration) };
@@ -43,12 +51,12 @@ export function validateEdit(body, media) {
   if (duration > 24 * 3600) throw new Error('The combined result must be under 24 hours.');
   return { format, quality, resolution, clips: normalized, duration, flipH: !!body.flipH, flipV: !!body.flipV, mute: formats[format].video && !!body.mute, preview: !!body.preview };
 }
-export function buildCommand(media, edit, input, output) {
+export function buildCommand(media: MediaMetadata, edit: Edit, input: string, output: string): string[] {
   const video = formats[edit.format].video;
   const audio = media.hasAudio && !edit.mute;
   const count = edit.clips.length;
-  const graph = [];
-  const inputs = [];
+  const graph: string[] = [];
+  const inputs: string[] = [];
   if (video) graph.push(`[0:${media.videoIndex}]setpts=PTS-STARTPTS,split=${count}${edit.clips.map((_, i) => `[vs${i}]`).join('')}`);
   if (audio) graph.push(`[0:${media.audioIndex}]asetpts=PTS-STARTPTS,asplit=${count}${edit.clips.map((_, i) => `[as${i}]`).join('')}`);
   edit.clips.forEach((clip, i) => {

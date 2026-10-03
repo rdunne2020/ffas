@@ -4,6 +4,19 @@
   "private": true,
   "type": "module",
   "description": "A local media editing workspace powered by FFmpeg",
-  "engines": { "node": ">=22" },
-  "scripts": { "start": "node server.mjs", "dev": "node --watch server.mjs", "test": "node --test" }
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "prestart": "npm run build",
+    "start": "node dist/server.js",
+    "dev": "npm run build && node dist/scripts/dev.js",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^7.0.2"
+  }
 }

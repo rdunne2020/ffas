@@ -4,13 +4,14 @@ A local FFmpeg editing workspace for video and audio. Upload a source, trim or s
 
 ## Run
 
-Requirements: Node.js 22+ and FFmpeg / FFprobe on `PATH`. The FFmpeg build needs `libx264`, `libvpx-vp9`, `libopus`, `libmp3lame`, AAC, FLAC, and PCM encoders for all export formats. No npm dependencies or install step are required.
+Requirements: Node.js 22+ and FFmpeg / FFprobe on `PATH`. The FFmpeg build needs `libx264`, `libvpx-vp9`, `libopus`, `libmp3lame`, AAC, FLAC, and PCM encoders for all export formats. TypeScript and Node.js type definitions are development dependencies. The running application has no npm runtime dependencies.
 
 ```sh
+npm ci
 npm start
 ```
 
-Open http://localhost:3000. Use `npm run dev` for server reloads during development; refresh the browser after frontend changes.
+Open http://localhost:3000. `npm start` builds the TypeScript sources before running the compiled server. Use `npm run dev` to watch TypeScript sources and restart the server after successful compilation; refresh the browser after frontend changes. HTML and CSS are served directly from `public/`.
 
 Optional configuration:
 
@@ -50,11 +51,11 @@ Requests are restricted to localhost hosts and same-origin browser access. Uploa
 ## Verification
 
 ```sh
+npm run typecheck
 npm test
-node --check server.mjs
-node --check lib/media.mjs
-node --check public/app.js
 ```
+
+`npm run typecheck` checks all application and test sources without emitting files. `npm test` builds and runs the compiled tests. You can also use `npm run build` to compile without starting the app. Keep the source tree alongside `dist/` when running the built server; it serves HTML/CSS from `public/` and retains data in the project-level `.data/`.
 
 The integration suite generates its own short video/audio fixtures in a temporary directory. It exercises actual uploads and FFmpeg jobs, splice order and decoded-frame transforms, output duration, all six export formats, silent video, muting, audio extraction, preview conversion, range requests, download headers, invalid edits, cross-origin rejection, cancellation, and restart persistence. Test media is deleted afterward.
 
@@ -62,15 +63,23 @@ Manual UI check: upload a short video, change the in/out points by dragging and 
 
 ## Structure
 
-- `server.mjs`: HTTP routes, streaming uploads, durable local metadata, job queue, file streaming / byte ranges.
-- `lib/media.mjs`: FFprobe metadata, edit validation, and FFmpeg filter/codec arguments.
-- `public/`: dependency-free responsive frontend.
-- `test/media.test.mjs`: real-media integration tests using Node's test runner.
+- `server.ts`: HTTP routes, streaming uploads, durable local metadata, job queue, file streaming / byte ranges.
+- `lib/media.ts`: FFprobe metadata, edit validation, and FFmpeg filter/codec arguments.
+- `public/app.ts`: typed browser editor; HTML and CSS remain in `public/`.
+- `shared/model.ts`: shared API contracts and runtime JSON validation.
+- `public/webmcp.d.ts`: types for the optional browser agent API.
+- `scripts/dev.ts`: development compiler and server watchers.
+- `tsconfig.json`: strict TypeScript configuration, including checked indexed access.
+- `dist/`: generated JavaScript; ignored by Git and never edited by hand.
+- `test/media.test.ts`: real-media integration tests using Node's test runner.
+- `test/model.test.ts`: malformed JSON rejection and saved-record compatibility checks.
 
 Trimming resets timestamps and feeds clips through FFmpeg's concat filter. See the [FFmpeg filter documentation](https://ffmpeg.org/ffmpeg-filters.html) for `trim`, `atrim`, `setpts`, `asetpts`, and `concat`.
 
 ## Browser verification
 
 Verified the local interface with a generated eight-second video: browser upload, exact numeric ranges, keyboard trimming, clip reordering, splitting/removal, horizontal flip, rendered-preview playback (verified three-second duration), and export submission. Inspected desktop and 390px-wide layouts. The generated demo source and outputs may be present in your local library.
+
+After the TypeScript migration, verified that the compiled frontend loads the existing library and exports, edits two ranges, applies a flip, and plays a newly rendered three-second preview. Strict type checking and all 11 tests pass; both `npm start` and the development watcher were smoke-tested.
 
 The frontend also feature-detects optional WebMCP controls for reading workspace state, staging a clip sequence, and queuing an export. This browser did not expose a compatible registry, so those optional controls could not be exercised here; the normal interface does not depend on them.

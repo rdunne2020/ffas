@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FFAS | Media workspace</title><meta name="description" content="Trim, splice, flip, and convert your video and audio with a local FFmpeg workspace.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/style.css"><script type="module" src="/app.js"></script>
+</head>
+<body>
+<header class="topbar"><a class="brand" href="/" aria-label="FFAS home"><span class="brand-mark">f.</span>ffas<span class="brand-caption">MEDIA WORKSPACE</span></a><div class="engine" id="engine">Connecting to engine</div></header>
+<div class="workspace">
+  <aside class="library">
+    <div class="section-heading"><h2>Your media</h2><span class="count" id="file-count">0</span></div>
+    <button class="button upload-button" id="upload-button"><span aria-hidden="true">+</span> Upload files</button>
+    <input type="file" id="file-input" accept="video/*,audio/*,.mkv,.flac,.m4a,.avi,.aiff" multiple hidden>
+    <div id="upload-status" class="upload-status" role="status"></div>
+    <div id="file-list" class="file-list"></div>
+    <div id="library-empty" class="library-empty">Your source files live here.<br>Upload a video or an audio file to begin.</div>
+    <div class="library-footer"><span class="small-label">ON YOUR MACHINE</span><p>Files and exports stay in this local workspace.</p></div>
+  </aside>
+  <main>
+    <div class="workspace-heading"><div><span class="eyebrow">THE EDITING ROOM</span><h1 id="source-title">Make the cut.</h1></div><span class="pill" id="source-kind">No file selected</span></div>
+    <div class="editor-grid">
+      <section class="editor" aria-label="Media editor">
+        <div class="viewer" id="drop-zone">
+          <div class="empty-view" id="empty-view">
+            <svg width="58" height="58" viewBox="0 0 58 58" fill="none" aria-hidden="true"><rect x="9" y="5" width="40" height="48" rx="5" stroke="currentColor" stroke-width="1.5"/><path d="M24 21L37 29L24 37V21Z" fill="currentColor"/><path d="M9 15H16M9 25H16M9 35H16M9 45H16M42 15H49M42 25H49M42 35H49M42 45H49" stroke="currentColor" stroke-width="1.5"/></svg>
+            <h2>A little less timeline.<br>A lot more possibility.</h2><p>Drop video or audio here to start your edit.</p><button class="button primary" id="browse">Choose a file</button><span class="format-hint">MP4, MOV, WebM, MP3, WAV and more · up to 1 GB</span>
+          </div>
+          <div id="media-view" hidden><video id="source-player" playsinline preload="metadata" aria-label="Source media preview"></video><div class="audio-art" id="audio-art" hidden><svg viewBox="0 0 80 80" width="76" height="76" fill="none" aria-hidden="true"><path d="M20 32V48M30 20V60M40 9V71M50 25V55M60 33V47" stroke="currentColor" stroke-width="4" stroke-linecap="round"/></svg><span id="audio-name"></span><span class="small-label">AUDIO SOURCE</span></div><div class="viewer-badge" id="viewer-badge">SOURCE PREVIEW</div></div>
+        </div>
+        <div class="playback"><button id="play" class="button icon-button" disabled aria-label="Play source">Play</button><span class="timecode"><span id="current-time">00:00.00</span><span class="muted"> / </span><span id="total-time" class="muted">00:00.00</span></span><button id="play-edit" class="text-button" disabled>Play selected clips</button><span id="source-info" class="source-info">Ready when you are</span></div>
+        <p id="playback-notice" class="notice" hidden></p>
+        <section class="timeline-section" aria-label="Clip timeline">
+          <div class="section-heading"><h2>Build your sequence</h2><span class="small-label">DRAG THE EDGES TO TRIM</span></div>
+          <div class="timeline" id="timeline"><div class="timeline-track" id="timeline-track"><div id="timeline-clips"></div><div id="selection" hidden><button id="start-handle" class="trim-handle start" role="slider" aria-label="Clip start" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"></button><button id="end-handle" class="trim-handle end" role="slider" aria-label="Clip end" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"></button></div><div id="playhead" hidden></div><span id="timeline-empty">YOUR TIMELINE STARTS HERE</span></div><div id="ruler" class="ruler"><span>00:00</span><span>00:00</span><span>00:00</span><span>00:00</span><span>00:00</span></div></div>
+          <input id="scrubber" class="scrubber" type="range" min="0" max="0" step="0.01" value="0" disabled aria-label="Seek source">
+          <div class="trim-controls"><label>In <input id="clip-start" type="number" min="0" step="0.01" value="0" disabled aria-label="Clip start in seconds"></label><button class="text-button" id="mark-in" disabled>Set at playhead</button><label>Out <input id="clip-end" type="number" min="0.04" step="0.01" value="0" disabled aria-label="Clip end in seconds"></label><button class="text-button" id="mark-out" disabled>Set at playhead</button></div>
+          <div class="sequence-header"><span class="muted">Clips play in the order below.</span><div><button class="button subtle" id="split-clip" disabled>Split at playhead</button><button class="button subtle" id="add-clip" disabled>+ Add clip</button></div></div>
+          <ol id="clip-list" class="clip-list"></ol><div class="sequence-total"><span id="clip-count">0 clips</span><span>Sequence duration <strong id="sequence-duration">00:00.00</strong></span></div>
+        </section>
+      </section>
+      <aside class="export-panel"><div class="section-heading"><h2>Export settings</h2><span class="small-label">01</span></div>
+        <fieldset id="settings" disabled>
+          <label class="field-label" for="format">Format</label><select id="format"><option value="mp4">MP4 · H.264</option><option value="webm">WebM · VP9</option><option value="mp3">MP3 · Audio</option><option value="m4a">M4A · AAC audio</option><option value="wav">WAV · Lossless audio</option><option value="flac">FLAC · Lossless audio</option></select><p id="format-description" class="field-help">A good fit for sharing and everyday playback.</p>
+          <label class="field-label" for="quality">Quality</label><select id="quality"><option value="high">High quality</option><option value="balanced" selected>Balanced</option><option value="small">Smaller file</option></select>
+          <label class="field-label" for="resolution">Resolution</label><select id="resolution"><option value="original">Keep original</option><option value="1080">Up to 1080p</option><option value="720">Up to 720p</option><option value="480">Up to 480p</option></select>
+          <div class="divider"></div><span class="field-label">Transform</span><label class="check-row"><span>Flip horizontal</span><input type="checkbox" id="flip-h"></label><label class="check-row"><span>Flip vertical</span><input type="checkbox" id="flip-v"></label><label class="check-row"><span>Remove audio</span><input type="checkbox" id="mute"></label>
+        </fieldset>
+        <div class="export-summary"><span>OUTPUT LENGTH</span><strong id="output-duration">00:00.00</strong><p id="export-description">Choose a source to get started.</p></div>
+        <button id="export" class="button primary export-button" disabled>Export file</button><button id="render-preview" class="button preview-button" disabled>Render preview</button><p class="preview-help">Preview renders your cuts and transforms at up to 720p.</p>
+      </aside>
+    </div>
+    <section class="jobs-section" aria-labelledby="jobs-heading"><div class="section-heading"><div class="jobs-title"><h2 id="jobs-heading">Your exports</h2><span class="count" id="job-count">0</span></div><span class="muted">Powered by FFmpeg</span></div><div id="jobs-empty" class="jobs-empty"><span>No exports yet</span><p>Your finished files will be ready to play and download here.</p></div><div id="job-list" class="job-list"></div></section>
+    <footer class="main-footer"><span>ffas / fewer commands, more creating.</span><span>LOCAL WORKSPACE</span></footer>
+  </main>
+</div>
+<div id="toast" class="toast" role="status" hidden></div>
+<dialog id="result-dialog"><div class="dialog-heading"><h2 id="result-title">Rendered preview</h2><button class="button subtle" id="close-dialog">Close</button></div><video id="result-player" controls playsinline></video><p id="result-notice" class="notice" hidden>Your browser cannot play this format. Download the file to play it locally.</p><a id="result-download" class="button primary">Download file</a></dialog>
+</body></html>

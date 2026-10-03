@@ -19,7 +19,7 @@ Optional configuration:
 PORT=3001 FFAS_DATA_DIR=/path/to/media-workspace npm start
 ```
 
-The server binds to `127.0.0.1`. Keep it local: this first version does not implement accounts, multi-user isolation, a production job runner, storage quotas, or automatic file expiration. A public deployment should add those and run media processing in isolated workers with resource limits.
+The server binds to `127.0.0.1` by default. To listen on all IPv4 interfaces, run `HOST=0.0.0.0 npm start` and connect using this machine's IP address or hostname on port 3000. Use a trusted network: this first version does not implement accounts, multi-user isolation, a production job runner, storage quotas, or automatic file expiration. A public deployment should add those and run media processing in isolated workers with resource limits.
 
 ## Workflow
 
@@ -46,7 +46,7 @@ Source files, results, and JSON metadata live in `.data/` (gitignored), or `FFAS
 
 Files are retained until manually removed. Stop the server before clearing its data directory. There is no automatic cleanup or disk quota yet. Limits: two concurrent uploads, eight active/queued jobs, one FFmpeg worker, a one-hour processing timeout, and a 24-hour source/output duration cap. Only the first video and audio tracks are used; subtitle and additional track export are not implemented. Splicing uses one source per export, not clips from multiple files.
 
-Requests are restricted to localhost hosts and same-origin browser access. Uploads stream to generated filenames, metadata is probed, and edits are validated. FFmpeg is invoked with argument arrays (no shell) and restricted input protocols/demuxers; playlists and external-resource inputs are not accepted. These are local-use safeguards, not a hardened sandbox for untrusted public uploads.
+Requests allow localhost hosts by default; network binding also allows the machine hostname and interface IP addresses. Same-origin browser checks remain enabled. Uploads stream to generated filenames, metadata is probed, and edits are validated. FFmpeg is invoked with argument arrays (no shell) and restricted input protocols/demuxers; playlists and external-resource inputs are not accepted. These are local-use safeguards, not a hardened sandbox for untrusted public uploads.
 
 ## Verification
 

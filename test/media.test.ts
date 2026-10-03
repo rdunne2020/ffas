@@ -1,10 +1,11 @@
+import { request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { MediaFile, Job, EditRequest } from '../shared/model.js';
 import { parseMediaFile, parseJob, parseList } from '../shared/model.js';
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { tmpdir, hostname } from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -128,4 +129,24 @@ test('media and completed exports survive restarting the server', async () => {
   base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   assert.equal(parseList((await request('/api/uploads')).data, parseMediaFile).length, originalFiles.length);
   assert.ok(parseList((await request('/api/jobs')).data, parseJob).some(job => job.status === 'completed'));
+});
+
+
+test('network mode accepts the machine hostname and retains origin checks', async () => {
+  const networkApp = await createApp({ dataDir: path.join(dir, 'network-data'), allowRemote: true });
+  await new Promise<void>(resolve => networkApp.server.listen(0, '127.0.0.1', resolve));
+  const port = (networkApp.server.address() as AddressInfo).port;
+  const url = `http://127.0.0.1:${port}/api/health`;
+  const host = `${hostname()}:${port}`;
+  const status = (headers: Record<string, string>): Promise<number | undefined> => new Promise((resolve, reject) => {
+    const req = httpRequest(url, { headers }, response => {
+      response.resume(); response.on('end', () => resolve(response.statusCode));
+    });
+    req.on('error', reject); req.end();
+  });
+  try {
+    assert.equal(await status({ Host: host, Origin: `http://${host}` }), 200);
+    assert.equal(await status({ Host: host, Origin: 'https://untrusted.example' }), 403);
+    assert.equal(await status({ Host: 'untrusted.example' }), 403);
+  } finally { networkApp.stop(); }
 });

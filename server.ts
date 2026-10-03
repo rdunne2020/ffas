@@ -12,6 +12,7 @@ import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { hostname, networkInterfaces } from 'node:os';
 import { probe, validateEdit, buildCommand, formats } from './lib/media.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -43,10 +44,18 @@ async function serveFile(req: IncomingMessage, res: ServerResponse, filename: st
   if (req.method === 'HEAD') { res.end(); return; }
   await pipeline(createReadStream(filename, { start, end }), res);
 }
-export interface AppOptions { dataDir?: string; maxUploadBytes?: number }
-export async function createApp({ dataDir = path.join(root, '.data'), maxUploadBytes = 1024 ** 3 }: AppOptions = {}) {
+export interface AppOptions { dataDir?: string; maxUploadBytes?: number; allowRemote?: boolean }
+export async function createApp({ dataDir = path.join(root, '.data'), maxUploadBytes = 1024 ** 3, allowRemote = false }: AppOptions = {}) {
   await mkdir(dataDir, { recursive: true });
   await Promise.all(['uploads', 'jobs'].map(dir => mkdir(path.join(dataDir, dir), { recursive: true })));
+  const allowedHosts = new Set(['localhost', '127.0.0.1', '[::1]']);
+  if (allowRemote) {
+    allowedHosts.add(hostname().toLowerCase());
+    allowedHosts.add('0.0.0.0');
+    for (const addresses of Object.values(networkInterfaces())) {
+      for (const address of addresses ?? []) allowedHosts.add(address.family === 'IPv6' ? `[${address.address}]` : address.address);
+    }
+  }
   const uploads = new Map<string, MediaFile>(), jobs = new Map<string, Job>();
   let active: { job: Job; child: ChildProcess } | null = null;
   let uploadCount = 0, stopping = false;
@@ -121,7 +130,7 @@ export async function createApp({ dataDir = path.join(root, '.data'), maxUploadB
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     try {
       const host = req.headers.host;
-      if (!host || !/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host)) return json(res, 403, { error: 'Only localhost connections are supported.' });
+      if (!host || !allowedHosts.has(new URL(`http://${host}`).hostname.toLowerCase())) return json(res, 403, { error: 'This hostname is not allowed.' });
       if (req.headers.origin && req.headers.origin !== `http://${host}`) return json(res, 403, { error: 'Cross-origin requests are not allowed.' });
       if (req.headers['sec-fetch-site'] === 'cross-site') return json(res, 403, { error: 'Cross-site requests are not allowed.' });
       const url = new URL(req.url ?? '/', `http://${host}`);
@@ -206,8 +215,9 @@ export async function createApp({ dataDir = path.join(root, '.data'), maxUploadB
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT || 3000);
-  const app = await createApp({ dataDir: process.env.FFAS_DATA_DIR || undefined });
-  app.server.listen(port, '127.0.0.1', () => console.log(`FFAS is ready at http://localhost:${port}`));
+  const host = process.env.HOST || '127.0.0.1';
+  const app = await createApp({ dataDir: process.env.FFAS_DATA_DIR || undefined, allowRemote: !['127.0.0.1', '::1', 'localhost'].includes(host) });
+  app.server.listen(port, host, () => console.log(`FFAS is listening on ${host}:${port}`));
   app.server.on('error', error => { console.error(errorMessage(error)); process.exitCode = 1; });
   process.on('SIGINT', () => app.stop());
   process.on('SIGTERM', () => app.stop());

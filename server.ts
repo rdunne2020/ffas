@@ -45,7 +45,9 @@ async function serveFile(req: IncomingMessage, res: ServerResponse, filename: st
   await pipeline(createReadStream(filename, { start, end }), res);
 }
 export interface AppOptions { dataDir?: string; maxUploadBytes?: number; allowRemote?: boolean }
-export async function createApp({ dataDir = path.join(root, '.data'), maxUploadBytes = 1024 ** 3, allowRemote = false }: AppOptions = {}) {
+export async function createApp({ dataDir = path.join(root, '.data'), maxUploadBytes = Math.floor(Number(process.env.FFAS_MAX_UPLOAD_GB ?? 1) * 1024 ** 3), allowRemote = false }: AppOptions = {}) {
+  if (!Number.isSafeInteger(maxUploadBytes) || maxUploadBytes <= 0) throw new Error('Upload limit must be a positive, safe integer in bytes. Set FFAS_MAX_UPLOAD_GB to a positive number of GB.');
+  const uploadLimitError = `The upload limit is ${maxUploadBytes / 1024 ** 3} GB (${maxUploadBytes} bytes).`;
   await mkdir(dataDir, { recursive: true });
   await Promise.all(['uploads', 'jobs'].map(dir => mkdir(path.join(dataDir, dir), { recursive: true })));
   const allowedHosts = new Set(['localhost', '127.0.0.1', '[::1]']);
@@ -152,7 +154,7 @@ export async function createApp({ dataDir = path.join(root, '.data'), maxUploadB
       if (req.method === 'POST' && pathname === '/api/uploads') {
         if (!available) return json(res, 503, { error: 'Install FFmpeg and FFprobe, then restart the server.' });
         if (uploadCount >= 2) return json(res, 429, { error: 'Two uploads are already in progress. Try again shortly.' });
-        if (Number(req.headers['content-length']) > maxUploadBytes) return json(res, 413, { error: 'The upload limit is 1 GB.' });
+        if (Number(req.headers['content-length']) > maxUploadBytes) return json(res, 413, { error: uploadLimitError });
         let name;
         try { const filenameHeader = req.headers['x-file-name']; if (Array.isArray(filenameHeader)) throw new Error('Invalid filename.'); name = decodeURIComponent(filenameHeader || 'media'); } catch { throw new Error('Invalid filename.'); }
         name = path.basename(name).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 180) || 'media';
@@ -162,7 +164,7 @@ export async function createApp({ dataDir = path.join(root, '.data'), maxUploadB
         let bytes = 0;
         uploadCount++;
         try {
-          const limit = new Transform({ transform(chunk, encoding, callback) { bytes += chunk.length; callback(bytes > maxUploadBytes ? new Error('The upload limit is 1 GB.') : null, chunk); } });
+          const limit = new Transform({ transform(chunk, encoding, callback) { bytes += chunk.length; callback(bytes > maxUploadBytes ? new Error(uploadLimitError) : null, chunk); } });
           await pipeline(req, limit, createWriteStream(filename, { flags: 'wx' }));
           if (!bytes) throw new Error('The file is empty.');
           let metadata;

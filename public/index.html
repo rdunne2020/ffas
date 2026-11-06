@@ -24,7 +24,7 @@
         <div class="viewer" id="drop-zone">
           <div class="empty-view" id="empty-view">
             <svg width="58" height="58" viewBox="0 0 58 58" fill="none" aria-hidden="true"><rect x="9" y="5" width="40" height="48" rx="5" stroke="currentColor" stroke-width="1.5"/><path d="M24 21L37 29L24 37V21Z" fill="currentColor"/><path d="M9 15H16M9 25H16M9 35H16M9 45H16M42 15H49M42 25H49M42 35H49M42 45H49" stroke="currentColor" stroke-width="1.5"/></svg>
-            <h2>A little less timeline.<br>A lot more possibility.</h2><p>Drop video or audio here to start your edit.</p><button class="button primary" id="browse">Choose a file</button><span class="format-hint">MP4, MOV, WebM, MP3, WAV and more · up to 1 GB</span>
+            <h2>A little less timeline.<br>A lot more possibility.</h2><p>Drop video or audio here to start your edit.</p><button class="button primary" id="browse">Choose a file</button><span class="format-hint">MP4, MOV, WebM, MP3, WAV and more<span id="upload-limit"></span></span>
           </div>
           <div id="media-view" hidden><video id="source-player" playsinline preload="metadata" aria-label="Source media preview"></video><div class="audio-art" id="audio-art" hidden><svg viewBox="0 0 80 80" width="76" height="76" fill="none" aria-hidden="true"><path d="M20 32V48M30 20V60M40 9V71M50 25V55M60 33V47" stroke="currentColor" stroke-width="4" stroke-linecap="round"/></svg><span id="audio-name"></span><span class="small-label">AUDIO SOURCE</span></div><div class="viewer-badge" id="viewer-badge">SOURCE PREVIEW</div></div>
         </div>

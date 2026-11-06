@@ -45,6 +45,7 @@ const elements = {
   'drop-zone': element('drop-zone', HTMLElement),
   'empty-view': element('empty-view', HTMLElement),
   'browse': element('browse', HTMLButtonElement),
+  'upload-limit': element('upload-limit', HTMLElement),
   'media-view': element('media-view', HTMLElement),
   'source-player': element('source-player', HTMLVideoElement),
   'audio-art': element('audio-art', HTMLElement),
@@ -110,9 +111,10 @@ interface EditorState {
   pendingPreview: string | null;
   engine: boolean;
   encoders: string[];
+  maxUploadBytes: number;
   submitting: boolean;
 }
-const state: EditorState = { files: [], source: null, clips: [], selected: 0, jobs: [], sequencePlaying: false, sequenceIndex: 0, uploading: false, pendingPreview: null, engine: false, encoders: [], submitting: false };
+const state: EditorState = { files: [], source: null, clips: [], selected: 0, jobs: [], sequencePlaying: false, sequenceIndex: 0, uploading: false, pendingPreview: null, engine: false, encoders: [], maxUploadBytes: 0, submitting: false };
 const encodingDirty = new Set<string>();
 let previousVideoCodec = '';
 const player = $('source-player');
@@ -431,7 +433,7 @@ async function uploadFiles(files: File[]) {
   if (!state.engine) return toast('The FFmpeg engine is not available.');
   state.uploading = true;
   for (const file of files) {
-    try { if (file.size > 1024 ** 3) throw new Error(`${file.name} exceeds the 1 GB limit.`); const media = await upload(file); state.files.unshift(media); selectFile(media); }
+    try { if (file.size > state.maxUploadBytes) throw new Error(`${file.name} exceeds the ${size(state.maxUploadBytes)} limit.`); const media = await upload(file); state.files.unshift(media); selectFile(media); }
     catch (error) { toast(errorMessage(error)); }
   }
   state.uploading = false; $('upload-status').textContent = '';
@@ -483,6 +485,8 @@ async function refreshJobs() {
 async function init() {
   try {
     const [health, files, jobs] = await Promise.all([api('/api/health', parseHealth), api('/api/uploads', value => parseList(value, parseMediaFile)), api('/api/jobs', value => parseList(value, parseJob))]);
+    state.maxUploadBytes = health.maxUploadBytes;
+    $('upload-limit').textContent = ` · up to ${size(health.maxUploadBytes)}`;
     state.engine = health.available; state.encoders = health.encoders ?? []; state.files = files; state.jobs = jobs;
     $('engine').textContent = health.available ? 'Local engine ready' : 'FFmpeg unavailable'; $('engine').classList.toggle('ready', health.available);
     renderLibrary(); renderJobs(); if (files[0]) selectFile(files[0]);

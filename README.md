@@ -16,14 +16,16 @@ Open http://localhost:3000. `npm start` builds the TypeScript sources before run
 Optional configuration:
 
 ```sh
-PORT=3001 FFAS_DATA_DIR=/path/to/media-workspace npm start
+PORT=3001 FFAS_DATA_DIR=/path/to/media-workspace FFAS_MAX_UPLOAD_GB=10 npm start
 ```
 
 The server binds to `127.0.0.1` by default. To listen on all IPv4 interfaces, run `HOST=0.0.0.0 npm start` and connect using this machine's IP address or hostname on port 3000. Use a trusted network: this first version does not implement accounts, multi-user isolation, a production job runner, storage quotas, or automatic file expiration. A public deployment should add those and run media processing in isolated workers with resource limits.
 
+`FFAS_MAX_UPLOAD_GB` sets the per-file upload limit (default: `1`). Positive fractional values such as `2.5` are supported; one GB here means 1,073,741,824 bytes. Restart the server and reload the browser after changing it. The browser displays and enforces the configured server limit. Invalid or nonpositive limits prevent startup.
+
 ## Workflow
 
-1. Upload or drop video / audio, up to 1 GB per file. Multiple files are accepted and appear in the media library.
+1. Upload or drop video / audio, up to the configured limit (1 GB per file by default). Multiple files are accepted and appear in the media library.
 2. Select a file. Scrub the timeline, drag its selection edges, enter exact start/end seconds, or set either edge at the playhead.
 3. Use **Split at playhead** to divide the current clip. Remove the pieces you do not want, add another range, or reorder clips with **Earlier / Later**. Clips from the selected source merge in list order. Repeated or overlapping ranges are allowed. Each clip must be at least 0.04 seconds, with up to 32 clips per export.
 4. Choose MP4, MKV, WebM, MP3, M4A, WAV, or FLAC. Choose H.264 (x264), H.265 / HEVC (x265), or VP9 where the container supports it. **Advanced encoding** exposes CRF or target video bitrate, encoder speed presets, frame rate, audio codec, and audio bitrate. Quality presets provide defaults; **Reset encoding overrides** restores those defaults. Video outputs support resolution caps, quality presets, horizontal/vertical flipping, and audio removal. Choosing an audio format from video extracts its audio. Resizing never intentionally upscales.

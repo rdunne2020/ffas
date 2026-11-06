@@ -55,6 +55,21 @@ test('uploads inspect video, audio and silent sources', () => {
   assert.equal(video.hasVideo, true); assert.equal(video.hasAudio, true); assert.equal(video.width, 320);
   assert.equal(audio.hasVideo, false); assert.equal(audio.hasAudio, true); assert.equal(silent.hasAudio, false);
 });
+test('configured upload limit is advertised and accepts the boundary while rejecting larger files', async () => {
+  const fixture = await readFile(path.join(dir, 'audio.wav'));
+  const limited = await createApp({ dataDir: path.join(dir, 'limited'), maxUploadBytes: fixture.length });
+  try {
+    await new Promise<void>(resolve => limited.server.listen(0, '127.0.0.1', resolve));
+    const url = `http://127.0.0.1:${(limited.server.address() as AddressInfo).port}`;
+    const health = await (await fetch(`${url}/api/health`)).json();
+    assert.equal(health.maxUploadBytes, fixture.length);
+    const accepted = await fetch(`${url}/api/uploads`, { method: 'POST', headers: { 'X-File-Name': 'audio.wav' }, body: fixture });
+    assert.equal(accepted.status, 201); await accepted.json();
+    const rejected = await fetch(`${url}/api/uploads`, { method: 'POST', body: Buffer.concat([fixture, Buffer.alloc(1)]) });
+    assert.equal(rejected.status, 413);
+    assert.match((await rejected.json()).error, new RegExp(`${fixture.length} bytes`));
+  } finally { limited.stop(); }
+});
 test('splices out-of-order clips, flips both axes, and creates an accurate MP4', async () => {
   const job = await finish({ uploadId: video.id, clips: [{ start: 2, end: 3 }, { start: .2, end: 1.2 }], format: 'mp4', flipH: true, flipV: true, quality: 'small', resolution: '480' });
   const metadata = await outputMetadata(job);
